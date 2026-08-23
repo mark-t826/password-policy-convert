@@ -1,0 +1,8 @@
+[package]
+name = "password-policy-convert"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Convert password composition policies between a rules file and a query-string format"
+
+[dependencies]
