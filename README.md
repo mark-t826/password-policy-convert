@@ -1,7 +1,7 @@
 # password-policy-convert
 
-Two password composition policy formats show up in the systems I've worked
-on. One is a line-based rules file:
+Password composition policy formats show up in the systems I've worked on.
+One is a line-based rules file:
 
 ```
 min_length=12
@@ -23,9 +23,15 @@ minLength=12&maxLength=64&upper=1&lower=1&digit=1&symbol=0&maxRepeat=3&minUnique
 
 Neither side reads the other's format, so migrating a policy between them
 has meant transcribing it by hand and occasionally dropping a field or
-flipping a `1`/`0`. This converts between the two through a shared
-`PasswordPolicy` struct, so the two formats never need to know about each
-other.
+flipping a `1`/`0`. This converts between formats through a shared
+`PasswordPolicy` struct, so no format needs to know about any other.
+
+There's also a JSON output format, for feeding a policy into something that
+expects structured input:
+
+```
+{"min_length":12,"max_length":64,"require_upper":true,"require_lower":true,"require_digit":true,"require_symbol":false,"max_repeated_chars":3,"min_unique_chars":6}
+```
 
 ## Usage
 
@@ -46,11 +52,17 @@ require_upper=true
 require_lower=false
 require_digit=true
 require_symbol=false
+
+$ cargo run -- to-json policy.rules
+{"min_length":12,"max_length":null,"require_upper":true,"require_lower":true,"require_digit":true,"require_symbol":false,"max_repeated_chars":null,"min_unique_chars":null}
 ```
 
 If no file argument is given, input is read from stdin. Unknown keys,
 missing values, and a missing `min_length`/`minLength` are reported as
 errors rather than silently defaulted.
+
+`to-json` is output-only for now — there's no parser for the JSON format,
+since nothing downstream needs to write policies as JSON yet.
 
 ## Library
 

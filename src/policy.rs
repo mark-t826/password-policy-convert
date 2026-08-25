@@ -224,6 +224,36 @@ fn bool_flag(value: bool) -> &'static str {
     }
 }
 
+/// Renders a policy as a JSON object. Absent optional fields serialize as
+/// `null` rather than being omitted, so every JSON document has the same
+/// fixed key set.
+///
+/// ```text
+/// {"min_length":12,"max_length":64,"require_upper":true,"require_lower":true,
+///  "require_digit":true,"require_symbol":false,"max_repeated_chars":3,"min_unique_chars":6}
+/// ```
+pub fn to_json(policy: &PasswordPolicy) -> String {
+    format!(
+        "{{\"min_length\":{},\"max_length\":{},\"require_upper\":{},\"require_lower\":{},\
+         \"require_digit\":{},\"require_symbol\":{},\"max_repeated_chars\":{},\"min_unique_chars\":{}}}",
+        policy.min_length,
+        json_optional_u32(policy.max_length),
+        policy.require_upper,
+        policy.require_lower,
+        policy.require_digit,
+        policy.require_symbol,
+        json_optional_u32(policy.max_repeated_chars),
+        json_optional_u32(policy.min_unique_chars),
+    )
+}
+
+fn json_optional_u32(value: Option<u32>) -> String {
+    match value {
+        Some(v) => v.to_string(),
+        None => "null".to_string(),
+    }
+}
+
 fn split_key_value(pair: &str, sep: char) -> Result<(&str, &str), PolicyError> {
     let mut parts = pair.splitn(2, sep);
     let key = parts.next().unwrap_or("").trim();
@@ -243,6 +273,16 @@ pub fn convert_rules_to_query(input: &str) -> Result<String, PolicyError> {
 /// Convenience wrapper: query text in, rules text out.
 pub fn convert_query_to_rules(input: &str) -> Result<String, PolicyError> {
     parse_query(input).map(|policy| to_rules(&policy))
+}
+
+/// Convenience wrapper: rules text in, JSON text out.
+pub fn convert_rules_to_json(input: &str) -> Result<String, PolicyError> {
+    parse_rules(input).map(|policy| to_json(&policy))
+}
+
+/// Convenience wrapper: query text in, JSON text out.
+pub fn convert_query_to_json(input: &str) -> Result<String, PolicyError> {
+    parse_query(input).map(|policy| to_json(&policy))
 }
 
 #[cfg(test)]
@@ -350,5 +390,42 @@ mod tests {
              require_digit=false\nrequire_symbol=false"
         );
         assert_eq!(to_query(&minimal), "minLength=8&upper=0&lower=0&digit=0&symbol=0");
+    }
+
+    #[test]
+    fn renders_full_policy_as_json() {
+        let json = to_json(&sample_policy());
+        assert_eq!(
+            json,
+            "{\"min_length\":12,\"max_length\":64,\"require_upper\":true,\"require_lower\":true,\
+             \"require_digit\":true,\"require_symbol\":false,\"max_repeated_chars\":3,\"min_unique_chars\":6}"
+        );
+    }
+
+    #[test]
+    fn renders_absent_optional_fields_as_json_null() {
+        let minimal = PasswordPolicy {
+            min_length: 8,
+            ..PasswordPolicy::default()
+        };
+        assert_eq!(
+            to_json(&minimal),
+            "{\"min_length\":8,\"max_length\":null,\"require_upper\":false,\"require_lower\":false,\
+             \"require_digit\":false,\"require_symbol\":false,\"max_repeated_chars\":null,\"min_unique_chars\":null}"
+        );
+    }
+
+    #[test]
+    fn convert_rules_to_json_matches_manual_conversion() {
+        let input = "min_length=8\nrequire_digit=true\n";
+        let policy = parse_rules(input).unwrap();
+        assert_eq!(convert_rules_to_json(input).unwrap(), to_json(&policy));
+    }
+
+    #[test]
+    fn convert_query_to_json_matches_manual_conversion() {
+        let input = "minLength=8&digit=1";
+        let policy = parse_query(input).unwrap();
+        assert_eq!(convert_query_to_json(input).unwrap(), to_json(&policy));
     }
 }
