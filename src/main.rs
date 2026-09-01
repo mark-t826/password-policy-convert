@@ -5,9 +5,10 @@ use std::process::ExitCode;
 
 use password_policy_convert::policy;
 
-const USAGE: &str = "usage: password-policy-convert <to-rules|to-query|to-json> [file]\n\
+const USAGE: &str = "usage: password-policy-convert <direction> [file]\n\
                       reads from stdin if no file is given\n\
-                      to-rules reads the query-string format; to-query and to-json read the rules format";
+                      directions: to-rules (query-string -> rules), to-query and to-json (rules -> ...),\n\
+                      from-json-to-rules and from-json-to-query (json -> ...)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
@@ -39,6 +40,8 @@ fn main() -> ExitCode {
         "to-rules" => policy::convert_query_to_rules(&input),
         "to-query" => policy::convert_rules_to_query(&input),
         "to-json" => policy::convert_rules_to_json(&input),
+        "from-json-to-rules" => policy::convert_json_to_rules(&input),
+        "from-json-to-query" => policy::convert_json_to_query(&input),
         other => {
             eprintln!("unknown direction '{other}'\n{USAGE}");
             return ExitCode::FAILURE;
