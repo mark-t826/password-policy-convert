@@ -69,6 +69,30 @@ If no file argument is given, input is read from stdin. Unknown keys,
 missing values, and a missing `min_length`/`minLength` are reported as
 errors rather than silently defaulted.
 
+## Validation
+
+A policy can parse cleanly and still be self-contradictory, e.g. a
+`max_length` below `min_length`, or requiring more character classes than
+`min_length` leaves room for. `validate` checks a parsed policy for these
+and reports them without changing anything:
+
+```
+$ cat bad.rules
+min_length=3
+max_length=2
+require_upper=true
+require_lower=true
+require_digit=true
+require_symbol=true
+
+$ cargo run -- validate bad.rules
+max_length (2) is less than min_length (3); no password can satisfy both
+4 character classes are required but min_length (3) is too short to fit one of each
+```
+
+This only inspects the rules format's field values against each other; it
+doesn't check a candidate password.
+
 ## Library
 
 The conversion logic lives in `src/policy.rs` and has no dependency on I/O:
@@ -91,3 +115,7 @@ First pass. The field set covers length, character-class requirements, max
 repeated characters, and minimum unique characters — enough for the two
 policies I actually needed to migrate. It doesn't yet cover things like
 forbidden substring lists or password history length.
+
+It also doesn't yet read PAM's `pwquality.conf` syntax, and there's no
+scoring of an actual password against a policy — just the four formats and
+validation of the policy's own fields against each other.

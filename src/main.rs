@@ -8,7 +8,8 @@ use password_policy_convert::policy;
 const USAGE: &str = "usage: password-policy-convert <direction> [file]\n\
                       reads from stdin if no file is given\n\
                       directions: to-rules (query-string -> rules), to-query and to-json (rules -> ...),\n\
-                      from-json-to-rules and from-json-to-query (json -> ...)";
+                      from-json-to-rules and from-json-to-query (json -> ...),\n\
+                      validate (rules -> list of contradictory-rule warnings)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
@@ -35,6 +36,26 @@ fn main() -> ExitCode {
             buf
         }
     };
+
+    if direction == "validate" {
+        return match policy::parse_rules(&input) {
+            Ok(parsed) => {
+                let warnings = policy::validate(&parsed);
+                if warnings.is_empty() {
+                    println!("no warnings");
+                } else {
+                    for warning in &warnings {
+                        println!("{warning}");
+                    }
+                }
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("conversion failed: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     let result = match direction {
         "to-rules" => policy::convert_query_to_rules(&input),

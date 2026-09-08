@@ -477,6 +477,106 @@ pub fn parse_json(input: &str) -> Result<PasswordPolicy, PolicyError> {
     Ok(policy)
 }
 
+/// A contradiction in a policy's own field values: two rules that cannot
+/// both be satisfied by any password, or a rule that cannot be satisfied by
+/// any non-empty password at all. `validate` never rejects a policy for
+/// this; contradictory policies still parse and convert, since it's not
+/// this library's place to decide the caller's minimum password length for
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyWarning {
+    MaxLengthBelowMinLength { min_length: u32, max_length: u32 },
+    MinUniqueCharsExceedsMaxLength { min_unique_chars: u32, max_length: u32 },
+    MinUniqueCharsExceedsMinLength { min_unique_chars: u32, min_length: u32 },
+    RequiredCharacterClassesExceedMinLength { required_classes: u32, min_length: u32 },
+    MaxRepeatedCharsIsZero,
+}
+
+impl fmt::Display for PolicyWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PolicyWarning::MaxLengthBelowMinLength { min_length, max_length } => write!(
+                f,
+                "max_length ({max_length}) is less than min_length ({min_length}); no password can satisfy both"
+            ),
+            PolicyWarning::MinUniqueCharsExceedsMaxLength { min_unique_chars, max_length } => write!(
+                f,
+                "min_unique_chars ({min_unique_chars}) is greater than max_length ({max_length}); no password can satisfy both"
+            ),
+            PolicyWarning::MinUniqueCharsExceedsMinLength { min_unique_chars, min_length } => write!(
+                f,
+                "min_unique_chars ({min_unique_chars}) is greater than min_length ({min_length}); \
+                 a password at the minimum length can never have enough unique characters"
+            ),
+            PolicyWarning::RequiredCharacterClassesExceedMinLength { required_classes, min_length } => write!(
+                f,
+                "{required_classes} character classes are required but min_length ({min_length}) \
+                 is too short to fit one of each"
+            ),
+            PolicyWarning::MaxRepeatedCharsIsZero => write!(
+                f,
+                "max_repeated_chars is 0, which forbids every character and rules out any non-empty password"
+            ),
+        }
+    }
+}
+
+/// Checks a policy for internal contradictions: field combinations that no
+/// password, however carefully chosen, could ever satisfy. This looks only
+/// at the fields against each other, not at any actual password.
+pub fn validate(policy: &PasswordPolicy) -> Vec<PolicyWarning> {
+    let mut warnings = Vec::new();
+
+    if let Some(max_length) = policy.max_length {
+        if max_length < policy.min_length {
+            warnings.push(PolicyWarning::MaxLengthBelowMinLength {
+                min_length: policy.min_length,
+                max_length,
+            });
+        }
+        if let Some(min_unique_chars) = policy.min_unique_chars {
+            if min_unique_chars > max_length {
+                warnings.push(PolicyWarning::MinUniqueCharsExceedsMaxLength {
+                    min_unique_chars,
+                    max_length,
+                });
+            }
+        }
+    }
+
+    if let Some(min_unique_chars) = policy.min_unique_chars {
+        if min_unique_chars > policy.min_length {
+            warnings.push(PolicyWarning::MinUniqueCharsExceedsMinLength {
+                min_unique_chars,
+                min_length: policy.min_length,
+            });
+        }
+    }
+
+    let required_classes = [
+        policy.require_upper,
+        policy.require_lower,
+        policy.require_digit,
+        policy.require_symbol,
+    ]
+    .into_iter()
+    .filter(|&required| required)
+    .count() as u32;
+
+    if required_classes > policy.min_length {
+        warnings.push(PolicyWarning::RequiredCharacterClassesExceedMinLength {
+            required_classes,
+            min_length: policy.min_length,
+        });
+    }
+
+    if policy.max_repeated_chars == Some(0) {
+        warnings.push(PolicyWarning::MaxRepeatedCharsIsZero);
+    }
+
+    warnings
+}
+
 fn split_key_value(pair: &str, sep: char) -> Result<(&str, &str), PolicyError> {
     let mut parts = pair.splitn(2, sep);
     let key = parts.next().unwrap_or("").trim();
@@ -747,5 +847,113 @@ mod tests {
         let input = to_json(&sample_policy());
         let policy = parse_json(&input).unwrap();
         assert_eq!(convert_json_to_query(&input).unwrap(), to_query(&policy));
+    }
+
+    #[test]
+    fn sane_policy_has_no_warnings() {
+        assert_eq!(validate(&sample_policy()), Vec::new());
+    }
+
+    #[test]
+    fn warns_when_max_length_is_below_min_length() {
+        let policy = PasswordPolicy {
+            min_length: 20,
+            max_length: Some(10),
+            ..PasswordPolicy::default()
+        };
+        assert_eq!(
+            validate(&policy),
+            vec![PolicyWarning::MaxLengthBelowMinLength {
+                min_length: 20,
+                max_length: 10,
+            }]
+        );
+    }
+
+    #[test]
+    fn warns_when_min_unique_chars_exceeds_max_length() {
+        let policy = PasswordPolicy {
+            min_length: 8,
+            max_length: Some(10),
+            min_unique_chars: Some(12),
+            ..PasswordPolicy::default()
+        };
+        assert_eq!(
+            validate(&policy),
+            vec![PolicyWarning::MinUniqueCharsExceedsMaxLength {
+                min_unique_chars: 12,
+                max_length: 10,
+            }]
+        );
+    }
+
+    #[test]
+    fn warns_when_min_unique_chars_exceeds_min_length() {
+        let policy = PasswordPolicy {
+            min_length: 8,
+            min_unique_chars: Some(10),
+            ..PasswordPolicy::default()
+        };
+        assert_eq!(
+            validate(&policy),
+            vec![PolicyWarning::MinUniqueCharsExceedsMinLength {
+                min_unique_chars: 10,
+                min_length: 8,
+            }]
+        );
+    }
+
+    #[test]
+    fn warns_when_required_classes_exceed_min_length() {
+        let policy = PasswordPolicy {
+            min_length: 2,
+            require_upper: true,
+            require_lower: true,
+            require_digit: true,
+            require_symbol: true,
+            ..PasswordPolicy::default()
+        };
+        assert_eq!(
+            validate(&policy),
+            vec![PolicyWarning::RequiredCharacterClassesExceedMinLength {
+                required_classes: 4,
+                min_length: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn warns_when_max_repeated_chars_is_zero() {
+        let policy = PasswordPolicy {
+            min_length: 8,
+            max_repeated_chars: Some(0),
+            ..PasswordPolicy::default()
+        };
+        assert_eq!(validate(&policy), vec![PolicyWarning::MaxRepeatedCharsIsZero]);
+    }
+
+    #[test]
+    fn reports_multiple_independent_contradictions_together() {
+        let policy = PasswordPolicy {
+            min_length: 20,
+            max_length: Some(10),
+            require_upper: true,
+            require_lower: true,
+            require_digit: true,
+            require_symbol: true,
+            max_repeated_chars: Some(0),
+            min_unique_chars: Some(15),
+        };
+        let warnings = validate(&policy);
+        assert_eq!(warnings.len(), 3);
+        assert!(warnings.contains(&PolicyWarning::MaxLengthBelowMinLength {
+            min_length: 20,
+            max_length: 10,
+        }));
+        assert!(warnings.contains(&PolicyWarning::MinUniqueCharsExceedsMaxLength {
+            min_unique_chars: 15,
+            max_length: 10,
+        }));
+        assert!(warnings.contains(&PolicyWarning::MaxRepeatedCharsIsZero));
     }
 }
