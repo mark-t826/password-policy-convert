@@ -956,4 +956,80 @@ mod tests {
         }));
         assert!(warnings.contains(&PolicyWarning::MaxRepeatedCharsIsZero));
     }
+
+    /// Xorshift32, not for anything cryptographic — just a small deterministic
+    /// generator so the fuzz test below is reproducible without pulling in a
+    /// dependency.
+    struct Xorshift32(u32);
+
+    impl Xorshift32 {
+        fn new(seed: u32) -> Self {
+            Xorshift32(if seed == 0 { 0xDEAD_BEEF } else { seed })
+        }
+
+        fn next_u32(&mut self) -> u32 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            self.0 = x;
+            x
+        }
+
+        fn next_bool(&mut self) -> bool {
+            self.next_u32() & 1 == 1
+        }
+
+        fn next_range(&mut self, max: u32) -> u32 {
+            self.next_u32() % (max + 1)
+        }
+
+        fn next_optional_u32(&mut self, max: u32) -> Option<u32> {
+            if self.next_bool() {
+                Some(self.next_range(max))
+            } else {
+                None
+            }
+        }
+    }
+
+    fn random_policy(rng: &mut Xorshift32) -> PasswordPolicy {
+        PasswordPolicy {
+            min_length: rng.next_range(64),
+            max_length: rng.next_optional_u32(128),
+            require_upper: rng.next_bool(),
+            require_lower: rng.next_bool(),
+            require_digit: rng.next_bool(),
+            require_symbol: rng.next_bool(),
+            max_repeated_chars: rng.next_optional_u32(20),
+            min_unique_chars: rng.next_optional_u32(64),
+        }
+    }
+
+    /// Generates a wide spread of policies, including contradictory and
+    /// zero-valued ones, and checks that every format round-trips them
+    /// byte-for-byte back to the same struct. The targeted tests above cover
+    /// specific shapes by hand; this covers the combinatorial space that
+    /// hand-picked cases tend to miss (e.g. a min_length that happens to be 0,
+    /// or an optional field landing on 0 versus absent).
+    #[test]
+    fn fuzz_round_trips_all_formats() {
+        let mut rng = Xorshift32::new(0x2545_F491);
+
+        for _ in 0..5000 {
+            let policy = random_policy(&mut rng);
+
+            let via_query = parse_query(&to_query(&policy)).unwrap();
+            assert_eq!(policy, via_query, "policy -> query -> policy changed the policy");
+
+            let via_rules = parse_rules(&to_rules(&policy)).unwrap();
+            assert_eq!(policy, via_rules, "policy -> rules -> policy changed the policy");
+
+            let via_json = parse_json(&to_json(&policy)).unwrap();
+            assert_eq!(policy, via_json, "policy -> json -> policy changed the policy");
+
+            // validate() must never panic, whatever the field combination.
+            let _ = validate(&policy);
+        }
+    }
 }
