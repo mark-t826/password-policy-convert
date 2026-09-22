@@ -65,6 +65,40 @@ require_digit=false
 require_symbol=false
 ```
 
+There's also read-only support for PAM's `pwquality.conf` syntax, since
+that's the format a few of the systems I deal with actually ship their
+policy in:
+
+```
+$ cat pwquality.conf
+minlen = 12
+dcredit = -1
+ucredit = -1
+lcredit = -1
+ocredit = -1
+maxrepeat = 3
+minclass = 4
+dictcheck = 1
+retry = 3
+
+$ cargo run -- from-pwquality-to-rules pwquality.conf
+min_length=12
+require_upper=true
+require_lower=true
+require_digit=true
+require_symbol=true
+max_repeated_chars=3
+```
+
+Only `minlen`, `maxrepeat`, and the `dcredit`/`ucredit`/`lcredit`/`ocredit`
+class-credit directives are read; everything else in the file (`minclass`,
+`dictcheck`, `retry`, bare flags like `enforce_for_root`, and so on) is
+ignored rather than rejected, since a real `pwquality.conf` carries plenty
+of settings `PasswordPolicy` has no field for. A negative credit value
+means "require at least one character of this class"; zero or positive
+does not. There is no `to-pwquality` direction — going the other way would
+mean inventing values for directives this library doesn't model.
+
 If no file argument is given, input is read from stdin. Unknown keys,
 missing values, and a missing `min_length`/`minLength` are reported as
 errors rather than silently defaulted.
@@ -116,6 +150,6 @@ repeated characters, and minimum unique characters — enough for the two
 policies I actually needed to migrate. It doesn't yet cover things like
 forbidden substring lists or password history length.
 
-It also doesn't yet read PAM's `pwquality.conf` syntax, and there's no
-scoring of an actual password against a policy — just the four formats and
-validation of the policy's own fields against each other.
+It now reads (but does not write) PAM's `pwquality.conf` syntax. There's
+still no scoring of an actual password against a policy — just the formats
+and validation of a policy's own fields against each other.

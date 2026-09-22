@@ -9,6 +9,8 @@ const USAGE: &str = "usage: password-policy-convert <direction> [file]\n\
                       reads from stdin if no file is given\n\
                       directions: to-rules (query-string -> rules), to-query and to-json (rules -> ...),\n\
                       from-json-to-rules and from-json-to-query (json -> ...),\n\
+                      from-pwquality-to-rules, from-pwquality-to-query and from-pwquality-to-json\n\
+                      (pwquality.conf -> ...),\n\
                       validate (rules -> list of contradictory-rule warnings)";
 
 fn main() -> ExitCode {
@@ -63,6 +65,9 @@ fn main() -> ExitCode {
         "to-json" => policy::convert_rules_to_json(&input),
         "from-json-to-rules" => policy::convert_json_to_rules(&input),
         "from-json-to-query" => policy::convert_json_to_query(&input),
+        "from-pwquality-to-rules" => policy::convert_pwquality_to_rules(&input),
+        "from-pwquality-to-query" => policy::convert_pwquality_to_query(&input),
+        "from-pwquality-to-json" => policy::convert_pwquality_to_json(&input),
         other => {
             eprintln!("unknown direction '{other}'\n{USAGE}");
             return ExitCode::FAILURE;

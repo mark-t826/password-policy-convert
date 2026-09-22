@@ -577,6 +577,88 @@ pub fn validate(policy: &PasswordPolicy) -> Vec<PolicyWarning> {
     warnings
 }
 
+/// Parses a subset of PAM's `pwquality.conf` directives into a
+/// `PasswordPolicy`. This direction only: `pwquality.conf` carries plenty of
+/// directives (dictionary checks, retry counts, per-user overrides) that
+/// have no equivalent field here, so there is no `to_pwquality` counterpart,
+/// and turning a `PasswordPolicy` back into `pwquality.conf` would have to
+/// invent values for all of them.
+///
+/// Recognized directives:
+///
+/// ```text
+/// minlen = 12
+/// dcredit = -1
+/// ucredit = -1
+/// lcredit = -1
+/// ocredit = -1
+/// maxrepeat = 3
+/// ```
+///
+/// `dcredit`/`ucredit`/`lcredit`/`ocredit` follow pwquality's own
+/// convention: a negative value requires at least one character of that
+/// class, while zero or positive does not (positive values grant a length
+/// credit pwquality applies elsewhere, which `PasswordPolicy` has no field
+/// for, so it's treated the same as zero). `maxrepeat = 0` means the check
+/// is disabled in pwquality, so it maps to `max_repeated_chars: None`
+/// rather than `Some(0)`, which would instead forbid every character.
+///
+/// Everything else — `minclass`, `dictcheck`, `retry`, bare flags like
+/// `enforce_for_root`, and any other directive — is ignored rather than
+/// rejected, since a real `pwquality.conf` will have directives this struct
+/// has no field for. `minlen` is the only directive required to be present,
+/// mirroring the other formats' required `min_length`.
+pub fn parse_pwquality(input: &str) -> Result<PasswordPolicy, PolicyError> {
+    let mut policy = PasswordPolicy::default();
+    let mut min_length_seen = false;
+
+    for raw_line in input.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            // Bare flag directive, e.g. `enforce_for_root` — not modeled.
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+
+        match key {
+            "minlen" => {
+                policy.min_length = parse_u32("minlen", value)?;
+                min_length_seen = true;
+            }
+            "maxrepeat" => {
+                let n = parse_u32("maxrepeat", value)?;
+                policy.max_repeated_chars = if n == 0 { None } else { Some(n) };
+            }
+            "dcredit" => policy.require_digit = parse_credit("dcredit", value)?,
+            "ucredit" => policy.require_upper = parse_credit("ucredit", value)?,
+            "lcredit" => policy.require_lower = parse_credit("lcredit", value)?,
+            "ocredit" => policy.require_symbol = parse_credit("ocredit", value)?,
+            _ => continue,
+        }
+    }
+
+    if !min_length_seen {
+        return Err(PolicyError::MissingRequiredField("minlen"));
+    }
+
+    Ok(policy)
+}
+
+fn parse_credit(key: &str, value: &str) -> Result<bool, PolicyError> {
+    value.parse::<i32>().map(|n| n < 0).map_err(|_| PolicyError::InvalidValue {
+        key: key.to_string(),
+        value: value.to_string(),
+    })
+}
+
 fn split_key_value(pair: &str, sep: char) -> Result<(&str, &str), PolicyError> {
     let mut parts = pair.splitn(2, sep);
     let key = parts.next().unwrap_or("").trim();
@@ -616,6 +698,21 @@ pub fn convert_json_to_rules(input: &str) -> Result<String, PolicyError> {
 /// Convenience wrapper: JSON text in, query text out.
 pub fn convert_json_to_query(input: &str) -> Result<String, PolicyError> {
     parse_json(input).map(|policy| to_query(&policy))
+}
+
+/// Convenience wrapper: pwquality.conf text in, rules text out.
+pub fn convert_pwquality_to_rules(input: &str) -> Result<String, PolicyError> {
+    parse_pwquality(input).map(|policy| to_rules(&policy))
+}
+
+/// Convenience wrapper: pwquality.conf text in, query text out.
+pub fn convert_pwquality_to_query(input: &str) -> Result<String, PolicyError> {
+    parse_pwquality(input).map(|policy| to_query(&policy))
+}
+
+/// Convenience wrapper: pwquality.conf text in, JSON text out.
+pub fn convert_pwquality_to_json(input: &str) -> Result<String, PolicyError> {
+    parse_pwquality(input).map(|policy| to_json(&policy))
 }
 
 #[cfg(test)]
@@ -955,6 +1052,87 @@ mod tests {
             max_length: 10,
         }));
         assert!(warnings.contains(&PolicyWarning::MaxRepeatedCharsIsZero));
+    }
+
+    #[test]
+    fn parses_pwquality_credits_and_length() {
+        let input = "minlen = 12\ndcredit = -1\nucredit = -1\nlcredit = -1\nocredit = 0\n";
+        let policy = parse_pwquality(input).unwrap();
+        assert_eq!(policy.min_length, 12);
+        assert!(policy.require_digit);
+        assert!(policy.require_upper);
+        assert!(policy.require_lower);
+        assert!(!policy.require_symbol);
+    }
+
+    #[test]
+    fn pwquality_positive_credit_does_not_require_class() {
+        let policy = parse_pwquality("minlen = 8\ndcredit = 1\n").unwrap();
+        assert!(!policy.require_digit);
+    }
+
+    #[test]
+    fn pwquality_maxrepeat_zero_means_no_limit() {
+        let policy = parse_pwquality("minlen = 8\nmaxrepeat = 0\n").unwrap();
+        assert_eq!(policy.max_repeated_chars, None);
+    }
+
+    #[test]
+    fn pwquality_maxrepeat_nonzero_is_kept() {
+        let policy = parse_pwquality("minlen = 8\nmaxrepeat = 3\n").unwrap();
+        assert_eq!(policy.max_repeated_chars, Some(3));
+    }
+
+    #[test]
+    fn pwquality_ignores_comments_blank_lines_bare_flags_and_unmodeled_directives() {
+        let input = "# system-wide pwquality settings\n\n\
+                      minlen = 10\n\
+                      minclass = 3\n\
+                      dictcheck = 1\n\
+                      retry = 3\n\
+                      enforce_for_root\n\
+                      local_users_only\n";
+        let policy = parse_pwquality(input).unwrap();
+        assert_eq!(policy.min_length, 10);
+    }
+
+    #[test]
+    fn pwquality_missing_minlen_is_an_error() {
+        let err = parse_pwquality("dcredit = -1\n").unwrap_err();
+        assert_eq!(err, PolicyError::MissingRequiredField("minlen"));
+    }
+
+    #[test]
+    fn pwquality_rejects_non_integer_minlen() {
+        let err = parse_pwquality("minlen = twelve\n").unwrap_err();
+        assert_eq!(
+            err,
+            PolicyError::InvalidValue {
+                key: "minlen".to_string(),
+                value: "twelve".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn convert_pwquality_to_rules_matches_manual_conversion() {
+        let input = "minlen = 12\ndcredit = -1\nucredit = -1\n";
+        let policy = parse_pwquality(input).unwrap();
+        assert_eq!(convert_pwquality_to_rules(input).unwrap(), to_rules(&policy));
+    }
+
+    #[test]
+    fn convert_pwquality_to_query_matches_manual_conversion() {
+        let input = "minlen = 12\nmaxrepeat = 4\n";
+        let policy = parse_pwquality(input).unwrap();
+        assert_eq!(convert_pwquality_to_query(input).unwrap(), to_query(&policy));
+    }
+
+    #[test]
+    fn convert_pwquality_to_json_matches_manual_conversion() {
+        let input = "minlen = 12\nocredit = -1\n";
+        let policy = parse_pwquality(input).unwrap();
+        assert_eq!(convert_pwquality_to_json(input).unwrap(), to_json(&policy));
     }
 
     /// Xorshift32, not for anything cryptographic — just a small deterministic
