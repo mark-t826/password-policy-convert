@@ -577,6 +577,118 @@ pub fn validate(policy: &PasswordPolicy) -> Vec<PolicyWarning> {
     warnings
 }
 
+/// One way a password fails to satisfy a policy. Unlike `PolicyWarning`,
+/// which compares a policy's fields against each other, this compares an
+/// actual password against an already-parsed policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PasswordViolation {
+    TooShort { min_length: u32, actual: u32 },
+    TooLong { max_length: u32, actual: u32 },
+    MissingUppercase,
+    MissingLowercase,
+    MissingDigit,
+    MissingSymbol,
+    RepeatedCharsExceeded { max_repeated_chars: u32, longest_run: u32 },
+    NotEnoughUniqueChars { min_unique_chars: u32, actual: u32 },
+}
+
+impl fmt::Display for PasswordViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PasswordViolation::TooShort { min_length, actual } => {
+                write!(f, "password is {actual} characters, but min_length is {min_length}")
+            }
+            PasswordViolation::TooLong { max_length, actual } => {
+                write!(f, "password is {actual} characters, but max_length is {max_length}")
+            }
+            PasswordViolation::MissingUppercase => write!(f, "password has no uppercase letter"),
+            PasswordViolation::MissingLowercase => write!(f, "password has no lowercase letter"),
+            PasswordViolation::MissingDigit => write!(f, "password has no digit"),
+            PasswordViolation::MissingSymbol => write!(f, "password has no symbol"),
+            PasswordViolation::RepeatedCharsExceeded { max_repeated_chars, longest_run } => write!(
+                f,
+                "password repeats a character {longest_run} times in a row, but max_repeated_chars is {max_repeated_chars}"
+            ),
+            PasswordViolation::NotEnoughUniqueChars { min_unique_chars, actual } => write!(
+                f,
+                "password has {actual} unique characters, but min_unique_chars is {min_unique_chars}"
+            ),
+        }
+    }
+}
+
+/// The longest run of a single character repeated consecutively, e.g. 3 for
+/// `"aabbbcc"`. An empty password has a run length of 0.
+fn longest_repeated_run(password: &str) -> u32 {
+    let mut longest = 0;
+    let mut current = 0;
+    let mut previous: Option<char> = None;
+
+    for c in password.chars() {
+        current = if Some(c) == previous { current + 1 } else { 1 };
+        previous = Some(c);
+        longest = longest.max(current);
+    }
+
+    longest
+}
+
+/// Checks a password against a policy's rules, reporting every rule it
+/// fails to satisfy. An empty result means the password satisfies the
+/// policy. This only checks the password itself; it has nothing to say
+/// about whether the policy's own fields make sense (see `validate` for
+/// that).
+pub fn check_password(policy: &PasswordPolicy, password: &str) -> Vec<PasswordViolation> {
+    let mut violations = Vec::new();
+    let length = password.chars().count() as u32;
+
+    if length < policy.min_length {
+        violations.push(PasswordViolation::TooShort {
+            min_length: policy.min_length,
+            actual: length,
+        });
+    }
+    if let Some(max_length) = policy.max_length {
+        if length > max_length {
+            violations.push(PasswordViolation::TooLong { max_length, actual: length });
+        }
+    }
+    if policy.require_upper && !password.chars().any(|c| c.is_uppercase()) {
+        violations.push(PasswordViolation::MissingUppercase);
+    }
+    if policy.require_lower && !password.chars().any(|c| c.is_lowercase()) {
+        violations.push(PasswordViolation::MissingLowercase);
+    }
+    if policy.require_digit && !password.chars().any(|c| c.is_ascii_digit()) {
+        violations.push(PasswordViolation::MissingDigit);
+    }
+    if policy.require_symbol
+        && !password.chars().any(|c| !c.is_alphanumeric() && !c.is_whitespace())
+    {
+        violations.push(PasswordViolation::MissingSymbol);
+    }
+    if let Some(max_repeated_chars) = policy.max_repeated_chars {
+        let longest_run = longest_repeated_run(password);
+        if longest_run > max_repeated_chars {
+            violations.push(PasswordViolation::RepeatedCharsExceeded {
+                max_repeated_chars,
+                longest_run,
+            });
+        }
+    }
+    if let Some(min_unique_chars) = policy.min_unique_chars {
+        let unique = password.chars().collect::<std::collections::HashSet<_>>().len() as u32;
+        if unique < min_unique_chars {
+            violations.push(PasswordViolation::NotEnoughUniqueChars {
+                min_unique_chars,
+                actual: unique,
+            });
+        }
+    }
+
+    violations
+}
+
 /// Parses a subset of PAM's `pwquality.conf` directives into a
 /// `PasswordPolicy`. This direction only: `pwquality.conf` carries plenty of
 /// directives (dictionary checks, retry counts, per-user overrides) that
@@ -1052,6 +1164,105 @@ mod tests {
             max_length: 10,
         }));
         assert!(warnings.contains(&PolicyWarning::MaxRepeatedCharsIsZero));
+    }
+
+    #[test]
+    fn password_satisfying_every_rule_has_no_violations() {
+        assert_eq!(check_password(&sample_policy(), "Correct7Horse"), Vec::new());
+    }
+
+    #[test]
+    fn reports_password_too_short() {
+        let policy = PasswordPolicy { min_length: 10, ..PasswordPolicy::default() };
+        assert_eq!(
+            check_password(&policy, "short"),
+            vec![PasswordViolation::TooShort { min_length: 10, actual: 5 }]
+        );
+    }
+
+    #[test]
+    fn reports_password_too_long() {
+        let policy = PasswordPolicy {
+            min_length: 1,
+            max_length: Some(5),
+            ..PasswordPolicy::default()
+        };
+        assert_eq!(
+            check_password(&policy, "toolongbyfar"),
+            vec![PasswordViolation::TooLong { max_length: 5, actual: 12 }]
+        );
+    }
+
+    #[test]
+    fn reports_missing_character_classes() {
+        let policy = PasswordPolicy {
+            min_length: 1,
+            require_upper: true,
+            require_lower: true,
+            require_digit: true,
+            require_symbol: true,
+            ..PasswordPolicy::default()
+        };
+        assert_eq!(
+            check_password(&policy, "lowercaseonly"),
+            vec![
+                PasswordViolation::MissingUppercase,
+                PasswordViolation::MissingDigit,
+                PasswordViolation::MissingSymbol,
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_repeated_chars_exceeding_limit() {
+        let policy = PasswordPolicy {
+            min_length: 1,
+            max_repeated_chars: Some(2),
+            ..PasswordPolicy::default()
+        };
+        assert_eq!(
+            check_password(&policy, "aaabbc"),
+            vec![PasswordViolation::RepeatedCharsExceeded {
+                max_repeated_chars: 2,
+                longest_run: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn reports_not_enough_unique_chars() {
+        let policy = PasswordPolicy {
+            min_length: 1,
+            min_unique_chars: Some(4),
+            ..PasswordPolicy::default()
+        };
+        assert_eq!(
+            check_password(&policy, "aabb"),
+            vec![PasswordViolation::NotEnoughUniqueChars { min_unique_chars: 4, actual: 2 }]
+        );
+    }
+
+    #[test]
+    fn reports_multiple_password_violations_together() {
+        let policy = PasswordPolicy {
+            min_length: 10,
+            require_digit: true,
+            max_repeated_chars: Some(1),
+            ..PasswordPolicy::default()
+        };
+        let violations = check_password(&policy, "aabb");
+        assert_eq!(violations.len(), 3);
+        assert!(violations.contains(&PasswordViolation::TooShort { min_length: 10, actual: 4 }));
+        assert!(violations.contains(&PasswordViolation::MissingDigit));
+        assert!(violations.contains(&PasswordViolation::RepeatedCharsExceeded {
+            max_repeated_chars: 1,
+            longest_run: 2,
+        }));
+    }
+
+    #[test]
+    fn empty_password_has_zero_longest_run() {
+        assert_eq!(longest_repeated_run(""), 0);
     }
 
     #[test]

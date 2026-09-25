@@ -127,6 +127,22 @@ max_length (2) is less than min_length (3); no password can satisfy both
 This only inspects the rules format's field values against each other; it
 doesn't check a candidate password.
 
+## Checking a password
+
+`check_password` takes a parsed policy and a candidate password and reports
+every rule the password fails, e.g. too short, missing a required character
+class, or repeating a character more times than `max_repeated_chars` allows:
+
+```
+$ cargo run -- check "short1" policy.rules
+password is 6 characters, but min_length is 12
+password has no uppercase letter
+```
+
+An empty result means the password satisfies the policy. This checks only
+the password against the policy's rules; it says nothing about how hard the
+password would be to guess.
+
 ## Library
 
 The conversion logic lives in `src/policy.rs` and has no dependency on I/O:
@@ -150,6 +166,7 @@ repeated characters, and minimum unique characters — enough for the two
 policies I actually needed to migrate. It doesn't yet cover things like
 forbidden substring lists or password history length.
 
-It now reads (but does not write) PAM's `pwquality.conf` syntax. There's
-still no scoring of an actual password against a policy — just the formats
-and validation of a policy's own fields against each other.
+It now reads (but does not write) PAM's `pwquality.conf` syntax, and can
+check an actual password against a policy's rules. It still doesn't cover
+forbidden substring lists or password history length, and password checking
+is pass/fail against each rule rather than a strength estimate.
